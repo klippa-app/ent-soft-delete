@@ -1,0 +1,55 @@
+{{ define "soft_delete/hook.go" }}
+{{ template "header" $ }}
+
+type skipKey struct{}
+
+// SkipSoftDelete returns a new context that skips the soft-delete interceptor/mutators.
+func Skip(parent context.Context) context.Context {
+	return context.WithValue(parent, skipKey{}, true)
+}
+
+func Interceptor() ent.Interceptor {
+	return intercept.TraverseFunc(func(ctx context.Context, q intercept.Query) error {
+		// Skip soft-delete, means include soft-deleted entities.
+		if skip, _ := ctx.Value(softDeleteKey{}).(bool); skip {
+			return nil
+		}
+		WhereDeleteTimeIsNull(q)
+		return nil
+	})
+}
+
+func Hook() ent.Hook {
+	return hook.On(
+		func(next ent.Mutator) ent.Mutator {
+			return ent.MutateFunc(func(ctx context.Context, m ent.Mutation) (ent.Value, error) {
+				// Skip soft-delete, means delete the entity permanently.
+				if skip, _ := ctx.Value(softDeleteKey{}).(bool); skip {
+					return next.Mutate(ctx, m)
+				}
+				mx, ok := m.(interface {
+					SetOp(ent.Op)
+					Client() *gen.Client
+					SetDeleteTime(time.Time)
+					WhereP(...func(*sql.Selector))
+				})
+				if !ok {
+					return nil, fmt.Errorf("unexpected mutation type %T", m)
+				}
+				WhereDeleteTimeIsNull(mx)
+				mx.SetOp(ent.OpUpdate)
+				mx.SetDeleteTime(time.Now())
+				return mx.Client().Mutate(ctx, m)
+			})
+		},
+		ent.OpDeleteOne|ent.OpDelete,
+	)
+},
+
+ 
+func WhereDeleteTimeIsNull(w interface{ WhereP(...func(*sql.Selector)) }) {
+	w.WhereP(
+		sql.FieldIsNull("delete_time"),
+	)
+}
+{{ end }}
